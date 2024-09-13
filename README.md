@@ -8,4 +8,4 @@ Check that python is installed with virtual environment. Then run the `install.b
 
 ## Run
 
-Run the script `start.bar` to start the app.
+Run the script `start.bat` to start the app.
