@@ -43,3 +43,10 @@ cur.execute(
     DELETE FROM tasks_fts5 WHERE id = OLD.id;
     end"""
 )
+
+cur.execute(
+    """CREATE TABLE settings (
+        id INTEGER NOT NULL PRIMARY KEY,
+        name NOT NULL TEXT,
+        value TEXT)"""
+)

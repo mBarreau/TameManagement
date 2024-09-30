@@ -106,14 +106,17 @@ def create_dropdown(id, placeholder, *args):
 
 
 def strptime(string):
-    return datetime.strptime(string, "%Y-%m-%d")
+    if string is not None:
+        return datetime.strptime(string, "%Y-%m-%d")
+    else:
+        return None
 
 
 def to_timestamp(string):
     if string is not None:
         return strptime(string).strftime("%d/%m/%Y")
     else:
-        return ""
+        return None
 
 
 create_card_modal = dbc.Modal(
@@ -277,7 +280,7 @@ def create_cards():
     con = sqlite3.connect("tame_management.db")
     cur = con.cursor()
     res = cur.execute(
-        f"SELECT id, title, due_date, sp, status FROM tasks WHERE sprint = TRUE ORDER BY due_date DESC"
+        f"SELECT id, title, due_date, sp, status FROM tasks WHERE sprint = TRUE ORDER BY due_date NULLS LAST"
     )
     cards = []
     for c in res:
@@ -427,7 +430,9 @@ def line_backlog(id, title, due_date, duration, status, in_sprint, *args):
                     ),
                 ],
             ),
-            html.Td(due_date, style={"width": "1%", "white-space": "nowrap"}),
+            html.Td(
+                to_timestamp(due_date), style={"width": "1%", "white-space": "nowrap"}
+            ),
             html.Td(duration, style={"width": "1%", "white-space": "nowrap"}),
             html.Td(
                 [
@@ -447,12 +452,65 @@ def line_backlog(id, title, due_date, duration, status, in_sprint, *args):
     )
 
 
-def create_backlog():
-
+def get_info_sprint():
     con = sqlite3.connect("tame_management.db")
     cur = con.cursor()
     res = cur.execute(
-        f"SELECT id, title, due_date, sp, status, sprint FROM tasks ORDER BY due_date NULLS LAST, id"
+        "SELECT name, value FROM settings WHERE name = 'sprint_start' OR name = 'sprint_end'"
+    ).fetchall()
+    output = {"sprint_start": None, "sprint_end": None}
+    for r in res:
+        output[r[0]] = strptime(r[1])
+    con.close()
+    return output
+
+
+@callback(
+    Output("sprint_modal", "is_open", allow_duplicate=True),
+    Input("start_sprint", "n_clicks"),
+    prevent_initial_call=True,
+)
+def open_start_sprint_modal(click):
+    if click:
+        return True
+
+
+@callback(
+    Output("sprint_modal", "is_open", allow_duplicate=True),
+    Output("update_page", "data", allow_duplicate=True),
+    Input("start_sprint_modal", "n_clicks"),
+    State("sprint_dates_modal", "start_date"),
+    State("sprint_dates_modal", "end_date"),
+    prevent_initial_call=True,
+)
+def start_sprint(click, start_date, end_date):
+    if click and start_date is not None and end_date is not None:
+        con = sqlite3.connect("tame_management.db")
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE settings SET value = ? WHERE name = 'sprint_start'",
+            (start_date.split("T")[0],),
+        )
+        cur.execute(
+            "UPDATE settings SET value = ? WHERE name = 'sprint_end'",
+            (end_date.split("T")[0],),
+        )
+        con.commit()
+        con.close()
+        return False, True
+    if click:
+        return True, no_update
+    else:
+        return False, no_update
+
+
+def create_backlog():
+    con = sqlite3.connect("tame_management.db")
+    cur = con.cursor()
+    res = cur.execute("SELECT value FROM settings WHERE name = 'sprint_start'")
+    sprint_info = get_info_sprint()
+    res = cur.execute(
+        "SELECT id, title, due_date, sp, status, sprint FROM tasks ORDER BY due_date NULLS LAST, id"
     )
 
     table_header = [
@@ -475,7 +533,8 @@ def create_backlog():
         row = line_backlog(*task)
         if task[5] == 1:
             rows_sprint.append(row)
-            sp[task[4]] += task[3]
+            if task[4] != "Done":
+                sp[task[4]] += task[3]
         else:
             if task[4] == "Done":
                 continue
@@ -491,18 +550,92 @@ def create_backlog():
         table_header + table_backlog_body, bordered=True, hover=True, striped=True
     )
 
-    text_sp = " / ".join([f"{key}: {value}" for key, value in sp.items()])
+    text_sp = " / ".join(
+        [f"{key}: {value}" for key, value in sp.items() if key != "Done"]
+    )
+
+    close_sprint = dbc.Button(
+        "Close Sprint",
+        id="close_sprint",
+        style={"margin-top": "-25px"},
+    )
+    start_sprint = dbc.Button(
+        "Start Sprint",
+        id="start_sprint",
+        style={"margin-top": "-25px"},
+    )
+
+    sprint_modal = dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle("Start a new sprint")),
+            dbc.ModalBody(
+                html.Div(
+                    [
+                        dcc.DatePickerRange(
+                            id="sprint_dates_modal",
+                            min_date_allowed=datetime.today(),
+                            initial_visible_month=datetime.today(),
+                            first_day_of_week=1,
+                            display_format="DD/MM/YY",
+                            start_date=datetime.today(),
+                            end_date=datetime.today() + timedelta(days=14),
+                        )
+                    ]
+                )
+            ),
+            dbc.ModalFooter(
+                [
+                    dbc.Button("Start sprint", id="start_sprint_modal"),
+                ]
+            ),
+        ],
+        id="sprint_modal",
+        size="lg",
+        is_open=False,
+    )
 
     return html.Div(
         [
+            sprint_modal,
             html.H2("Current Sprint"),
-            html.P([text_sp + " / ", html.B(f"Total: {sum(sp.values())}")]),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [text_sp + " / ", html.B(f"Total: {sum(sp.values())}")],
+                        width=9,
+                    ),
+                    dbc.Col(
+                        close_sprint if sprint_info["sprint_start"] else start_sprint
+                    ),
+                ]
+            ),
             table_sprint,
             html.H2("Backlog"),
             table_backlog,
         ],
         style={"margin": "auto", "width": "90%", "margin-top": "20px"},
     )
+
+
+@callback(
+    Output("update_page", "data", allow_duplicate=True),
+    Input("close_sprint", "n_clicks"),
+    prevent_initial_call=True,
+)
+def close_sprint(click):
+    if click:
+        con = sqlite3.connect("tame_management.db")
+        cur = con.cursor()
+        cur.execute(
+            """UPDATE tasks SET sprint = FALSE WHERE sprint = TRUE AND status = 'Done'"""
+        )
+        cur.execute(
+            """UPDATE settings SET value = NULL WHERE name = 'sprint_start' OR name = 'sprint_end'"""
+        )
+        con.commit()
+        con.close()
+        return True
+    return False
 
 
 @callback(
@@ -573,9 +706,10 @@ def layout():
                         dbc.Button(
                             "New task", id=f"create_card_button", className="ms-auto"
                         ),
-                        dbc.NavLink("Sprint dashboard", href="/", active="exact"),
+                        dbc.NavLink("Current sprint", href="/", active="exact"),
                         dbc.NavLink("Backlog", href="/backlog", active="exact"),
                         dbc.NavLink("Search", href="/search", active="exact"),
+                        # dbc.NavLink("Settings", href="/settings", active="exact"),
                     ],
                     brand="TameManagement",
                     color="dark",
@@ -662,7 +796,9 @@ def render_page_content(_, pathname):
         return create_backlog()
     elif pathname == "/search":
         return create_search()
-    # If the user tries to reach a different page, return a 404 message
+    elif pathname == "/settings":
+        return html.H1("Settings")
+
     return html.Div(
         [
             html.H1("404: Not found", className="text-danger"),
