@@ -1,4 +1,5 @@
 from datetime import datetime, date, timedelta
+import math
 import sqlite3
 from dash import (
     Dash,
@@ -13,6 +14,8 @@ from dash import (
     ctx,
 )
 import dash_bootstrap_components as dbc
+import pytz
+import icalendar, requests, recurring_ical_events
 
 
 def create_card(card):
@@ -350,7 +353,11 @@ def create_dashboard(cards):
     columns = {"To Do": [], "In Progress": [], "Blocked": [], "Done": []}
     for c in cards:
         columns[c["status"]].append(c)
-    dashboard = []
+    sprint_info = get_info_sprint()
+    dashboard = [
+            html.H2(f"Current Sprint: {sprint_info["sprint_start"].strftime('%b-%d')} to {sprint_info["sprint_end"].strftime('%b-%d')}"),
+            html.P(f"{(sprint_info["sprint_end"] - datetime.today()).days} days left")
+        ]
     for i in range(max_length(columns) + 1):
         row = []
         for column in columns:
@@ -507,7 +514,6 @@ def start_sprint(click, start_date, end_date):
 def create_backlog():
     con = sqlite3.connect("tame_management.db")
     cur = con.cursor()
-    res = cur.execute("SELECT value FROM settings WHERE name = 'sprint_start'")
     sprint_info = get_info_sprint()
     res = cur.execute(
         "SELECT id, title, due_date, sp, status, sprint FROM tasks ORDER BY due_date NULLS LAST, id"
@@ -579,7 +585,8 @@ def create_backlog():
                             display_format="DD/MM/YY",
                             start_date=datetime.today(),
                             end_date=datetime.today() + timedelta(days=14),
-                        )
+                        ),
+                        html.P(id="sprint_start_notes"),
                     ]
                 )
             ),
@@ -594,6 +601,18 @@ def create_backlog():
         is_open=False,
     )
 
+    available_time = ""
+    if sprint_info["sprint_start"]:
+        today = datetime.today()
+        new_hour = today.hour
+        new_minute = math.ceil(today.minute / 30) * 30
+        if new_minute >= 60:
+            new_hour += 1
+            new_minute = 0
+        today = today.replace(hour=new_hour, minute=new_minute, second=0, microsecond=0)
+        end = sprint_info["sprint_end"] + timedelta(hours=23, minutes=59)
+        available_time = f" ({get_busy_time(today, end, get_calendars()) * 0.5} left)"
+
     return html.Div(
         [
             sprint_modal,
@@ -601,7 +620,11 @@ def create_backlog():
             dbc.Row(
                 [
                     dbc.Col(
-                        [text_sp + " / ", html.B(f"Total: {sum(sp.values())}")],
+                        [
+                            text_sp + " / ",
+                            html.B(f"Total: {sum(sp.values())}"),
+                            available_time,
+                        ],
                         width=9,
                     ),
                     dbc.Col(
@@ -615,6 +638,112 @@ def create_backlog():
         ],
         style={"margin": "auto", "width": "90%", "margin-top": "20px"},
     )
+
+
+def get_schedule(start, end, urls):
+    schedule = {}
+    day = start
+    if day.hour < 8:
+        day = day.replace(hour=0, minute=0).astimezone(pytz.timezone("Europe/Berlin"))
+    start_of_the_day = timedelta(hours=8)
+    end_of_the_day = timedelta(hours=17)
+    delta_time = timedelta(minutes=30)
+
+    # Generate an empty calendar
+    while day <= end:
+        if day.weekday() > 4:
+            day += timedelta(days=1)
+            continue
+        day_schedule = {}
+        day_ = day.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_time = day_ + end_of_the_day
+        time = day + start_of_the_day if day.hour == 0 else day
+        while time < end_time:
+            day_schedule[(time - day_).seconds] = False
+            time += delta_time
+        schedule[day_.astimezone(pytz.timezone("Europe/Berlin"))] = day_schedule
+        day = day_ + timedelta(days=1)
+
+    # Fill in the empty calendar
+    for url in urls:
+        cal = icalendar.Calendar.from_ical(requests.get(url).text)
+        for event in recurring_ical_events.of(cal).between(start, end):
+            if not isinstance(event["DTSTART"].dt, datetime):
+                event["DTSTART"].dt = (
+                    datetime(
+                        event["DTSTART"].dt.year,
+                        event["DTSTART"].dt.month,
+                        event["DTSTART"].dt.day,
+                        0,
+                        0,
+                    ).astimezone(pytz.timezone("Europe/Berlin"))
+                    + start_of_the_day
+                )
+                event["DTEND"].dt = (
+                    datetime(
+                        event["DTEND"].dt.year,
+                        event["DTEND"].dt.month,
+                        event["DTEND"].dt.day,
+                        0,
+                        0,
+                    ).astimezone(pytz.timezone("Europe/Berlin"))
+                    - timedelta(days=1)
+                    + end_of_the_day
+                )
+
+            duration = event["DTEND"].dt - event["DTSTART"].dt  # in seconds
+            day = datetime(
+                event["DTSTART"].dt.year,
+                event["DTSTART"].dt.month,
+                event["DTSTART"].dt.day,
+            ).astimezone(pytz.timezone("Europe/Berlin"))
+            delta_start = event["DTSTART"].dt - day
+            new_event_start = (
+                delta_start.seconds // delta_time.seconds
+            ) * delta_time.seconds
+            while timedelta(seconds=new_event_start) <= end_of_the_day:
+                schedule[day][new_event_start] = True
+                new_event_start += delta_time.seconds
+                if new_event_start >= delta_start.seconds + duration.seconds:
+                    break
+
+    return schedule
+
+
+def get_busy_time(start, end, urls):
+    schedule = get_schedule(start, end, urls)
+    free_slots = 0
+    for d in schedule.values():
+        for e in d.values():
+            if not e:
+                free_slots += 1
+    return free_slots
+
+
+def get_calendars():
+    con = sqlite3.connect("tame_management.db")
+    cur = con.cursor()
+    res = cur.execute("SELECT value FROM settings WHERE name = 'calendars'").fetchone()
+    urls = []
+    if res is not None:
+        for c in res[0].split(";"):
+            urls.append(c.split("|")[1])
+        con.close()
+    return urls
+
+
+@callback(
+    Output("sprint_start_notes", "children"),
+    Input("sprint_dates_modal", "start_date"),
+    Input("sprint_dates_modal", "end_date"),
+    Input("start_sprint", "n_clicks"),
+    prevent_initial_call=True,
+)
+def update_sprint_free_time(start, end, _):
+    start = strptime(start.split("T")[0])
+    end = strptime(end.split("T")[0]) + timedelta(hours=23, minutes=59)
+    free_slots = get_busy_time(start, end, get_calendars())
+    return f"Available: {free_slots * 0.5} hours"
 
 
 @callback(
@@ -644,7 +773,7 @@ def close_sprint(click):
     State("searchbar", "value"),
     prevent_initial_call=True,
 )
-def search(start, value):
+def search(_, value):
     if value:
         escaped_value = '"' + '" "'.join(value.split(" ")) + '"'
         con = sqlite3.connect("tame_management.db")
