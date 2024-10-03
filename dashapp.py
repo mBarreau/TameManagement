@@ -65,13 +65,13 @@ def create_card(card):
                 ]
             ),
         ],
-        color=compute_color(card["due_date"]),
+        color=compute_color(card["due_date"], card["status"]),
         inverse=True,
     )
 
 
-def compute_color(due_date):
-    if due_date:
+def compute_color(due_date, status="To Do"):
+    if due_date and status != "Done":
         due_date = strptime(due_date)
         if due_date <= datetime.today():
             return "danger"
@@ -405,7 +405,7 @@ def toggle_new_card(
 
 
 def line_backlog(id, title, due_date, duration, status, in_sprint, *args):
-    color = compute_color(due_date)
+    color = compute_color(due_date, status)
     if color == "danger":
         color = "red"
     elif color == "success":
