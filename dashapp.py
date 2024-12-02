@@ -355,9 +355,11 @@ def create_dashboard(cards):
         columns[c["status"]].append(c)
     sprint_info = get_info_sprint()
     dashboard = [
-            html.H2(f"Current Sprint: {sprint_info["sprint_start"].strftime('%b-%d')} to {sprint_info["sprint_end"].strftime('%b-%d')}"),
-            html.P(f"{(sprint_info["sprint_end"] - datetime.today()).days} days left")
-        ]
+        html.H2(
+            f"Current Sprint: {sprint_info["sprint_start"].strftime('%b-%d')} to {sprint_info["sprint_end"].strftime('%b-%d')}"
+        ),
+        html.P(f"{(sprint_info["sprint_end"] - datetime.today()).days} days left"),
+    ]
     for i in range(max_length(columns) + 1):
         row = []
         for column in columns:
@@ -642,6 +644,10 @@ def create_backlog():
 
 def get_schedule(start, end, urls):
     schedule = {}
+
+    if end <= start:
+        return schedule
+
     day = start
     if day.hour < 8:
         day = day.replace(hour=0, minute=0).astimezone(pytz.timezone("Europe/Berlin"))
